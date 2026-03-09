@@ -1,3 +1,30 @@
+# Fine-Tune ArcFace on PetFace
+
+This repository is used in the [AFaRec System](https://github.com/Jan108/AFaRec) to train and predict ArcFace.
+
+## Reproduction Quicksteps
+Clone Repo and use Python 3.10:
+1. Run ```pip install torch==1.12.1+cu116 torchvision==0.13.1+cu116 torchaudio==0.12.1 --extra-index-url https://download.pytorch.org/whl/cu116```
+7. Run ```pip install -r requirements.txt```
+8. Prepare data: Use [AFaRec datasetup OAFI](https://github.com/Jan108/AFaRec/blob/main/data/oafi.py#L83)/
+9. Alter the Path in [train_predict_yunet.sh](train_predict_yunet.sh)
+10. Train: ```bash train_predict_yunet.sh```
+
+
+
+| OAFI         | PetFace                                                         | #ID    |
+|--------------|-----------------------------------------------------------------|--------|
+| bird         | parakeet, javasparrow                                           | 5947   |
+| cat          | cat                                                             | 164100 |
+| cat-like     |                                                                 |        |
+| dog          | dog                                                             | 71613  |
+| dog-like     |                                                                 |        |
+| horse-like   | pig?                                                            |        |
+| small-animal | rabbit, hamster, guineapig, chinchilla, degus, ferret, hedgehog | 13590  |
+
+
+Below is the old README.
+
 # Distributed Arcface Training in Pytorch
 
 The "arcface_torch" repository is the official implementation of the ArcFace algorithm. It supports distributed and sparse training with multiple distributed training examples, including several memory-saving techniques such as mixed precision training and gradient checkpointing. It also supports training for ViT models and datasets including WebFace42M and Glint360K, two of the largest open-source datasets. Additionally, the repository comes with a built-in tool for converting to ONNX format, making it easy to submit to MFR evaluation systems.
