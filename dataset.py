@@ -1,58 +1,33 @@
-import numbers
 import os
 import queue as Queue
 import threading
+from functools import partial
 from typing import Iterable
 
-import mxnet as mx
 import numpy as np
 import torch
-from functools import partial
-from torch import distributed
+from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
-from torchvision.datasets import ImageFolder
+
 from utils.utils_distributed_sampler import DistributedSampler
 from utils.utils_distributed_sampler import get_dist_info, worker_init_fn
 
 
 def get_dataloader(
     root_dir,
+    img_list,
     local_rank,
     batch_size,
-    dali = False,
-    dali_aug = False,
     seed = 2048,
     num_workers = 2,
     ) -> Iterable:
 
-    rec = os.path.join(root_dir, 'train.rec')
-    idx = os.path.join(root_dir, 'train.idx')
-    train_set = None
+    train_set = PetFaceDataset(root_dir, img_list)
 
     # Synthetic
     if root_dir == "synthetic":
         train_set = SyntheticDataset()
-        dali = False
-
-    # Mxnet RecordIO
-    elif os.path.exists(rec) and os.path.exists(idx):
-        train_set = MXFaceDataset(root_dir=root_dir, local_rank=local_rank)
-
-    # Image Folder
-    else:
-        transform = transforms.Compose([
-             transforms.RandomHorizontalFlip(),
-             transforms.ToTensor(),
-             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
-             ])
-        train_set = ImageFolder(root_dir, transform)
-
-    # DALI
-    if dali:
-        return dali_data_iter(
-            batch_size=batch_size, rec_file=rec, idx_file=idx,
-            num_threads=2, local_rank=local_rank, dali_aug=dali_aug)
 
     rank, world_size = get_dist_info()
     train_sampler = DistributedSampler(
@@ -74,7 +49,7 @@ def get_dataloader(
         worker_init_fn=init_fn,
     )
 
-    return train_loader
+    return train_loader, train_set.num_classes, len(train_set)
 
 class BackgroundGenerator(threading.Thread):
     def __init__(self, generator, local_rank, max_prefetch=6):
@@ -134,43 +109,46 @@ class DataLoaderX(DataLoader):
         return batch
 
 
-class MXFaceDataset(Dataset):
-    def __init__(self, root_dir, local_rank):
-        super(MXFaceDataset, self).__init__()
-        self.transform = transforms.Compose(
-            [transforms.ToPILImage(),
-             transforms.RandomHorizontalFlip(),
-             transforms.ToTensor(),
-             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
-             ])
-        self.root_dir = root_dir
-        self.local_rank = local_rank
-        path_imgrec = os.path.join(root_dir, 'train.rec')
-        path_imgidx = os.path.join(root_dir, 'train.idx')
-        self.imgrec = mx.recordio.MXIndexedRecordIO(path_imgidx, path_imgrec, 'r')
-        s = self.imgrec.read_idx(0)
-        header, _ = mx.recordio.unpack(s)
-        if header.flag > 0:
-            self.header0 = (int(header.label[0]), int(header.label[1]))
-            self.imgidx = np.array(range(1, int(header.label[0])))
-        else:
-            self.imgidx = np.array(list(self.imgrec.keys))
+class PetFaceDataset(Dataset):
+    def __init__(self, root_dir, img_list):
+        super(PetFaceDataset, self).__init__()
+
+        self.transform = transforms.Compose([
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
+        ])
+        self.image_list = []
+        self.label_list = []
+
+        with open(img_list, 'r') as f:
+            for line in f:
+                line = line.strip()
+                img_path, img_label = line.split(',')
+                if img_path == 'label':
+                    continue
+
+                img_path = os.path.join(root_dir, img_path)
+                if not os.path.exists(img_path):
+                    continue
+
+                self.image_list.append(img_path)
+                self.label_list.append(int(img_label))
+        self.num_classes = len(set(self.label_list))
+        print(f'Loaded Dataset from {img_list}: found {len(self.image_list)} images with {self.num_classes} classes')
+
 
     def __getitem__(self, index):
-        idx = self.imgidx[index]
-        s = self.imgrec.read_idx(idx)
-        header, img = mx.recordio.unpack(s)
-        label = header.label
-        if not isinstance(label, numbers.Number):
-            label = label[0]
+        path_img = self.image_list[index]
+        label = self.label_list[index]
+        img = Image.open(path_img).convert('RGB').crop((28, 28, 196, 169)).resize((112, 112), Image.LANCZOS)
+
+        sample = self.transform(img)
         label = torch.tensor(label, dtype=torch.long)
-        sample = mx.image.imdecode(img).asnumpy()
-        if self.transform is not None:
-            sample = self.transform(sample)
         return sample, label
 
     def __len__(self):
-        return len(self.imgidx)
+        return len(self.image_list)
 
 
 class SyntheticDataset(Dataset):
@@ -188,96 +166,3 @@ class SyntheticDataset(Dataset):
 
     def __len__(self):
         return 1000000
-
-
-def dali_data_iter(
-    batch_size: int, rec_file: str, idx_file: str, num_threads: int,
-    initial_fill=32768, random_shuffle=True,
-    prefetch_queue_depth=1, local_rank=0, name="reader",
-    mean=(127.5, 127.5, 127.5), 
-    std=(127.5, 127.5, 127.5),
-    dali_aug=False
-    ):
-    """
-    Parameters:
-    ----------
-    initial_fill: int
-        Size of the buffer that is used for shuffling. If random_shuffle is False, this parameter is ignored.
-
-    """
-    rank: int = distributed.get_rank()
-    world_size: int = distributed.get_world_size()
-    import nvidia.dali.fn as fn
-    import nvidia.dali.types as types
-    from nvidia.dali.pipeline import Pipeline
-    from nvidia.dali.plugin.pytorch import DALIClassificationIterator
-
-    def dali_random_resize(img, resize_size, image_size=112):
-        img = fn.resize(img, resize_x=resize_size, resize_y=resize_size)
-        img = fn.resize(img, size=(image_size, image_size))
-        return img
-    def dali_random_gaussian_blur(img, window_size):
-        img = fn.gaussian_blur(img, window_size=window_size * 2 + 1)
-        return img
-    def dali_random_gray(img, prob_gray):
-        saturate = fn.random.coin_flip(probability=1 - prob_gray)
-        saturate = fn.cast(saturate, dtype=types.FLOAT)
-        img = fn.hsv(img, saturation=saturate)
-        return img
-    def dali_random_hsv(img, hue, saturation):
-        img = fn.hsv(img, hue=hue, saturation=saturation)
-        return img
-    def multiplexing(condition, true_case, false_case):
-        neg_condition = condition ^ True
-        return condition * true_case + neg_condition * false_case
-
-    condition_resize = fn.random.coin_flip(probability=0.1)
-    size_resize = fn.random.uniform(range=(int(112 * 0.5), int(112 * 0.8)), dtype=types.FLOAT)
-    condition_blur = fn.random.coin_flip(probability=0.2)
-    window_size_blur = fn.random.uniform(range=(1, 2), dtype=types.INT32)
-    condition_flip = fn.random.coin_flip(probability=0.5)
-    condition_hsv = fn.random.coin_flip(probability=0.2)
-    hsv_hue = fn.random.uniform(range=(0., 20.), dtype=types.FLOAT)
-    hsv_saturation = fn.random.uniform(range=(1., 1.2), dtype=types.FLOAT)
-
-    pipe = Pipeline(
-        batch_size=batch_size, num_threads=num_threads,
-        device_id=local_rank, prefetch_queue_depth=prefetch_queue_depth, )
-    condition_flip = fn.random.coin_flip(probability=0.5)
-    with pipe:
-        jpegs, labels = fn.readers.mxnet(
-            path=rec_file, index_path=idx_file, initial_fill=initial_fill, 
-            num_shards=world_size, shard_id=rank,
-            random_shuffle=random_shuffle, pad_last_batch=False, name=name)
-        images = fn.decoders.image(jpegs, device="mixed", output_type=types.RGB)
-        if dali_aug:
-            images = fn.cast(images, dtype=types.UINT8)
-            images = multiplexing(condition_resize, dali_random_resize(images, size_resize, image_size=112), images)
-            images = multiplexing(condition_blur, dali_random_gaussian_blur(images, window_size_blur), images)
-            images = multiplexing(condition_hsv, dali_random_hsv(images, hsv_hue, hsv_saturation), images)
-            images = dali_random_gray(images, 0.1)
-
-        images = fn.crop_mirror_normalize(
-            images, dtype=types.FLOAT, mean=mean, std=std, mirror=condition_flip)
-        pipe.set_outputs(images, labels)
-    pipe.build()
-    return DALIWarper(DALIClassificationIterator(pipelines=[pipe], reader_name=name, ))
-
-
-@torch.no_grad()
-class DALIWarper(object):
-    def __init__(self, dali_iter):
-        self.iter = dali_iter
-
-    def __next__(self):
-        data_dict = self.iter.__next__()[0]
-        tensor_data = data_dict['data'].cuda()
-        tensor_label: torch.Tensor = data_dict['label'].cuda().long()
-        tensor_label.squeeze_()
-        return tensor_data, tensor_label
-
-    def __iter__(self):
-        return self
-
-    def reset(self):
-        self.iter.reset()

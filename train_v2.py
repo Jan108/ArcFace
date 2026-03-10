@@ -43,6 +43,12 @@ def main(args):
 
     # get config
     cfg = get_config(args.config)
+
+    # Parse args into config
+    cfg.network = args.network
+    cfg.output = args.output
+    cfg.margin_list = (1.0, 0.0, 0.4) if args.loss.lower() == 'cosface' else (1.0, 0.5, 0.0)
+
     # global control random seed
     setup_seed(seed=cfg.seed, cuda_deterministic=False)
 
@@ -56,7 +62,7 @@ def main(args):
         if rank == 0
         else None
     )
-    
+
     wandb_logger = None
     if cfg.using_wandb:
         import wandb
@@ -82,12 +88,11 @@ def main(args):
         except Exception as e:
             print("WandB Data (Entity and Project name) must be provided in config file (base.py).")
             print(f"Config Error: {e}")
-    train_loader = get_dataloader(
-        cfg.rec,
+    train_loader, num_classes, num_samples = get_dataloader(
+        args.img_path,
+        args.img_list,
         local_rank,
         cfg.batch_size,
-        cfg.dali,
-        cfg.dali_aug,
         cfg.seed,
         cfg.num_workers
     )
@@ -114,7 +119,7 @@ def main(args):
 
     if cfg.optimizer == "sgd":
         module_partial_fc = PartialFC_V2(
-            margin_loss, cfg.embedding_size, cfg.num_classes,
+            margin_loss, cfg.embedding_size, num_classes,
             cfg.sample_rate, False)
         module_partial_fc.train().cuda()
         # TODO the params of partial fc must be last in the params list
@@ -124,7 +129,7 @@ def main(args):
 
     elif cfg.optimizer == "adamw":
         module_partial_fc = PartialFC_V2(
-            margin_loss, cfg.embedding_size, cfg.num_classes,
+            margin_loss, cfg.embedding_size, num_classes,
             cfg.sample_rate, False)
         module_partial_fc.train().cuda()
         opt = torch.optim.AdamW(
@@ -134,8 +139,8 @@ def main(args):
         raise
 
     cfg.total_batch_size = cfg.batch_size * world_size
-    cfg.warmup_step = cfg.num_image // cfg.total_batch_size * cfg.warmup_epoch
-    cfg.total_step = cfg.num_image // cfg.total_batch_size * cfg.num_epoch
+    cfg.warmup_step = num_samples // cfg.total_batch_size * cfg.warmup_epoch
+    cfg.total_step = num_samples // cfg.total_batch_size * cfg.num_epoch
 
     lr_scheduler = PolynomialLRWarmup(
         optimizer=opt,
@@ -158,10 +163,6 @@ def main(args):
         num_space = 25 - len(key)
         logging.info(": " + key + " " * num_space + str(value))
 
-    callback_verification = CallBackVerification(
-        val_targets=cfg.val_targets, rec_prefix=cfg.rec, 
-        summary_writer=summary_writer, wandb_logger = wandb_logger
-    )
     callback_logging = CallBackLogging(
         frequent=cfg.frequent,
         total_step=cfg.total_step,
@@ -210,9 +211,6 @@ def main(args):
                 loss_am.update(loss.item(), 1)
                 callback_logging(global_step, loss_am, epoch, cfg.fp16, lr_scheduler.get_last_lr()[0], amp)
 
-                if global_step % cfg.verbose == 0 and global_step > 0:
-                    callback_verification(global_step, backbone)
-
         if cfg.save_all_states:
             checkpoint = {
                 "epoch": epoch + 1,
@@ -253,5 +251,10 @@ if __name__ == "__main__":
     torch.backends.cudnn.benchmark = True
     parser = argparse.ArgumentParser(
         description="Distributed Arcface Training in Pytorch")
-    parser.add_argument("config", type=str, help="py config file")
+    parser.add_argument("--config", type=str, default='./configs/petface_base.py', help="py config file")
+    parser.add_argument("--network", type=str, default='r50', help="network name: r18, r34, r50, r100")
+    parser.add_argument("--output", type=str, default='./work_dir', help="Output directory")
+    parser.add_argument("--loss", type=str, default='arcface', help="loss function: arcface or cosface")
+    parser.add_argument("--img_path", type=str, default='./data/images', help="Image file rott directory")
+    parser.add_argument("--img_list", type=str, default='./data/split/train.csv', help="File containing a list of images files with corresponding label")
     main(parser.parse_args())

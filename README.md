@@ -5,10 +5,11 @@ This repository is used in the [AFaRec System](https://github.com/Jan108/AFaRec)
 ## Reproduction Quicksteps
 Clone Repo and use Python 3.10:
 1. Run ```pip install torch==1.12.1+cu116 torchvision==0.13.1+cu116 torchaudio==0.12.1 --extra-index-url https://download.pytorch.org/whl/cu116```
-7. Run ```pip install -r requirements.txt```
-8. Prepare data: Use [AFaRec datasetup OAFI](https://github.com/Jan108/AFaRec/blob/main/data/oafi.py#L83)/
-9. Alter the Path in [train_predict_yunet.sh](train_predict_yunet.sh)
-10. Train: ```bash train_predict_yunet.sh```
+2. Run ```pip install -r requirements.txt```
+3. Alter .venv/lib/python3.10/site-packages/mxnet/numpy/utils.py:37 to bool = bool
+4. Prepare PetFace data: Use [AFaRec datasetup PetFace](https://github.com/Jan108/AFaRec/blob/main/data/petface.py#L5)/
+5. Alter the Path in [train_arcface.sh](train_arcface.sh)
+6. Train: ```bash train_arcface.sh```
 
 
 
