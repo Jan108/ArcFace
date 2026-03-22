@@ -5,3 +5,4 @@ onnx
 scikit-learn
 opencv-python
 pandas
+tqdm
