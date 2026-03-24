@@ -69,10 +69,20 @@ def verification(params):
         F.normalize(net(img2.to(device)))
         end_time = datetime.now()
         inf_times.append(end_time - start_time)
-    avg_time = sum(inf_times, start=timedelta()) / len(inf_times)
-    print(f'Inference for {params.weights} took {avg_time}')
+    avg_time_pair = sum(inf_times, start=timedelta()) / len(inf_times)
+
+    inf_times = []
+    for img1, img2, label in tqdm(islice(test_loader_latency, params.latency_test),
+                                  desc='Test image pairs latency', total=params.latency_test):
+        start_time = datetime.now()
+        F.normalize(net(img1.to(device)))
+        end_time = datetime.now()
+        inf_times.append(end_time - start_time)
+    avg_time_single = sum(inf_times, start=timedelta()) / len(inf_times)
+    print(f'Inference for {params.weights} took pair: {avg_time_pair}, single: {avg_time_single}')
     with open(os.path.join(params.output, 'timing.txt'), 'w') as file:
-        file.write(str(avg_time))
+        file.write(str(avg_time_pair)+'\n')
+        file.write(str(avg_time_single)+'\n')
 
 
 def identification(params):
@@ -114,9 +124,13 @@ def identification(params):
         # Get top 5 similarities and indices
         top5_sim, top5_indices = torch.topk(sim, k=5, dim=1)
 
+        pred_labels = [
+            [pool_labels[i] for i in topk] for topk in top5_indices.tolist()
+        ]
+
         all_labels.extend(test_labels.tolist())
         all_sims.extend(top5_sim.tolist())
-        all_indices.extend(top5_indices.tolist())
+        all_indices.extend(pred_labels)
 
     # Open output file
     os.makedirs(os.path.dirname(params.output), exist_ok=True)
@@ -139,7 +153,7 @@ if __name__ == "__main__":
     parser.add_argument("--latency_test", type=int, default=1000, help="Amount of images for the latency test")
     parser.add_argument("--ident-general", action='store_true', help="Generalized model evaluation")
     args = parser.parse_args()
-    # verification(args)
+    verification(args)
     args.identification_file = 'identification.csv'
     if args.ident_general:
         base_path_ident = args.img_identification
